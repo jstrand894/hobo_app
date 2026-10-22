@@ -679,6 +679,7 @@ class ThemeSwitching(GuiCase):
 class LayoutStability(GuiCase):
     def test_cards_do_not_resize_when_values_change(self):
         a = self.app
+        self.spin(1.2)                                               # let the layout settle after connecting
         base = [(c.winfo_width(), c.winfo_height()) for c in a._cards[:2]]
         for temp, rh, nxt in ((-40.0, 100, 3), (60.0, 5, 59), (22.0, 35, 31)):
             d = dict(a.logger_info)
@@ -686,6 +687,112 @@ class LayoutStability(GuiCase):
             a._fill_live(d)
             self.spin(0.5)
             self.assertEqual([(c.winfo_width(), c.winfo_height()) for c in a._cards[:2]], base)
+
+
+class Checklist(GuiCase):
+    """The right-hand checklist: readout, save, launch. Items animate a check mark and grey out as they finish."""
+
+    def states(self):
+        return {k: self.app._steps_ui[k][0].state for k in ("readout", "save", "launch")}
+
+    def grey(self, key):
+        return self.app._steps_ui[key][1].cget("foreground") == theme.color("key")
+
+    def settle(self):
+        self.spin(0.8)                                                # let the check-mark animation finish
+
+    def test_hidden_until_a_logger_is_connected(self):
+        self.device.present = False
+        self.wait(lambda: self.app.link == "none")
+        self.assertEqual(self.app.check_rows.winfo_manager(), "")
+        self.assertIn("Connect a logger", self.app.check_hint.cget("text"))
+        self.device.present = True
+        self.wait(lambda: self.app.link == "ok")
+        self.assertEqual(self.app.check_rows.winfo_manager(), "pack")
+        self.assertEqual(self.app.check_hint.winfo_manager(), "")
+
+    def test_first_step_is_current_and_the_rest_wait(self):
+        self.assertEqual(self.states(), {"readout": "pending", "save": "blocked", "launch": "blocked"})
+        self.assertFalse(self.grey("readout"))                         # the current step is in full-strength text
+        self.assertTrue(self.grey("save") and self.grey("launch"))
+
+    def test_steps_check_off_in_order_and_grey_out(self):
+        self.do_readout()
+        self.settle()
+        self.assertEqual(self.states(), {"readout": "done", "save": "pending", "launch": "blocked"})
+        self.assertEqual(self.app._steps_ui["readout"][0].progress, 1.0)       # animation completed
+        self.assertTrue(self.grey("readout"))
+        self.do_save()
+        self.settle()
+        self.assertEqual(self.states(), {"readout": "done", "save": "done", "launch": "pending"})
+        self.click(self.app.btn_launch)
+        self.spin(0.3)
+        self.app.start_launch()
+        self.wait(lambda: self.app.steps["launch"])
+        self.settle()
+        self.assertEqual(self.states(), {"readout": "done", "save": "done", "launch": "done"})
+        self.assertTrue(all(self.grey(k) for k in ("readout", "save", "launch")))
+
+    def test_check_mark_animates(self):
+        item = self.app._steps_ui["readout"][0]
+        item.set_state("done")
+        self.assertLess(item.progress, 1.0)                           # starts mid-animation, not instantly
+        seen = set()
+        end = time.time() + 1.0
+        while time.time() < end:
+            self.app.update()
+            seen.add(round(item.progress, 1))
+            time.sleep(0.01)
+        self.assertEqual(item.progress, 1.0)
+        self.assertGreater(len(seen), 4)                              # it went through several frames
+
+    def test_a_new_readout_starts_the_checklist_over(self):
+        self.do_readout()
+        self.do_save()
+        self.assertEqual(self.states()["save"], "done")
+        self.do_readout()
+        self.assertEqual(self.states(), {"readout": "done", "save": "pending", "launch": "blocked"})
+
+    def test_unplugging_resets_it(self):
+        self.do_readout()
+        self.device.present = False
+        self.wait(lambda: self.app.link == "none")
+        self.assertEqual(self.app.steps, {"readout": False, "save": False, "launch": False})
+        self.assertEqual(set(self.states().values()), {"blocked"})
+
+    def test_saving_a_file_you_opened_does_not_tick_the_logger_steps(self):
+        mem, ptr = make_memory(samples=[(5.0, 50.0)] * 5)
+        path = os.path.join(self.tmp, "o.hobo")
+        with open(path, "wb") as f:
+            f.write(mem[:-(-ptr // 64) * 64])
+        self.answers["open"] = path
+        self.click(self.app.btn_open)
+        self.do_save()
+        self.assertEqual(self.states(), {"readout": "pending", "save": "blocked", "launch": "blocked"})
+
+    def test_the_card_keeps_its_size_when_the_steps_appear(self):
+        self.device.present = False
+        self.wait(lambda: self.app.link == "none")
+        self.spin(1.0)
+        before = [(c.winfo_width(), c.winfo_height()) for c in self.app._cards[:2]]
+        self.device.present = True
+        self.wait(lambda: self.app.link == "ok")
+        self.spin(1.0)
+        self.assertEqual([(c.winfo_width(), c.winfo_height()) for c in self.app._cards[:2]], before)
+
+    def test_live_reading_sits_in_the_status_card(self):
+        logger_body = self.app._cards[0].body
+
+        def texts(w):
+            out = []
+            for c in w.winfo_children():
+                out += texts(c)
+                if c.winfo_class() == "Label":
+                    out.append(c.cget("text") or self.app.getvar(str(c.cget("textvariable"))) if c.cget("textvariable") else c.cget("text"))
+            return out
+        found = texts(logger_body)
+        self.assertIn("71.6 °F", found)
+        self.assertIn("35 % RH", found)
 
 
 class Widgets(GuiCase):

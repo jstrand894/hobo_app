@@ -663,3 +663,78 @@ class MemoryBar(tk.Canvas):
         if self.frac > 0:
             col = "#ff453a" if self.frac >= 0.95 else "#ff9f0a" if self.frac >= 0.8 else theme.color("accent")
             round_rect(self, 0, 0, max(h, w * self.frac), h, h / 2, fill=col, outline=col)
+
+
+class CheckItem(tk.Canvas):
+    """A numbered step marker. States: blocked (grey ring), pending (accent ring, the current step), done.
+
+    Becoming done plays a short animation: the circle fills green, then a check mark draws itself."""
+
+    CHECK = ((0.30, 0.53), (0.44, 0.67), (0.72, 0.36))     # check mark corners, as fractions of the box
+
+    def __init__(self, master, number, size=28, bg_key="card_bg"):
+        super().__init__(master, width=size, height=size, highlightthickness=0, bd=0, background=theme.color(bg_key))
+        self.number, self.size, self.bg_key = number, size, bg_key
+        self.state, self.progress = "blocked", 0.0
+        self._job = None
+        self.draw()
+
+    def set_state(self, state, animate=True):
+        if state == self.state:
+            return
+        old, self.state = self.state, state
+        if self._job:
+            self.after_cancel(self._job)
+            self._job = None
+        if state == "done" and animate and old != "done":
+            self.progress = 0.0
+            self._step()
+        else:
+            self.progress = 1.0 if state == "done" else 0.0
+            self.draw()
+
+    def _step(self):
+        self.progress = min(1.0, self.progress + 0.07)
+        self.draw()
+        self._job = self.after(16, self._step) if self.progress < 1.0 else None
+
+    def destroy(self):
+        if self._job:
+            try:
+                self.after_cancel(self._job)
+            except tk.TclError:
+                pass
+        super().destroy()
+
+    def draw(self):
+        self.delete("all")
+        tk.Canvas.config(self, background=theme.color(self.bg_key))
+        S = self.size
+        c, r = S / 2, S / 2 - 3
+        if self.state == "done":
+            grow = min(1.0, self.progress / 0.4)               # first 40 %: the green disc grows in
+            if grow < 1.0:
+                self.create_oval(c - r, c - r, c + r, c + r, outline=theme.color("track"), width=2, fill="")
+            if grow > 0:
+                disc(self, c, c, r * grow, "#34c759")
+            t = max(0.0, (self.progress - 0.4) / 0.6)          # then the check mark draws itself
+            if t > 0:
+                pts = [(x * S, y * S) for x, y in self.CHECK]
+                seg = [math.dist(pts[0], pts[1]), math.dist(pts[1], pts[2])]
+                reach, path = t * sum(seg), [pts[0]]
+                for i, length in enumerate(seg):
+                    if reach >= length:
+                        path.append(pts[i + 1])
+                        reach -= length
+                    else:
+                        a, b = pts[i], pts[i + 1]
+                        path.append((a[0] + (b[0] - a[0]) * reach / length, a[1] + (b[1] - a[1]) * reach / length))
+                        break
+                if len(path) >= 2:
+                    self.create_line(*[v for pt in path for v in pt], fill="#ffffff", width=2.8, capstyle="round",
+                                     joinstyle="round")
+            return
+        ring = theme.color("accent") if self.state == "pending" else theme.color("track")
+        self.create_oval(c - r, c - r, c + r, c + r, outline=ring, width=2, fill="")
+        self.create_text(c, c, text=str(self.number), font=(".AppleSystemUIFont", 12, "bold"),
+                         fill=theme.color("accent") if self.state == "pending" else theme.color("key"))

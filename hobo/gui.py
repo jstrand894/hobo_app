@@ -16,7 +16,7 @@ from .decode import Readout
 from .device import Logger, logger_present
 from . import autostart, theme
 from .version import __author__, __version__
-from .widgets import (Battery, Card, GearButton, IconButton, Light, MemoryBar, Pill, ProgressBar, Switch,
+from .widgets import (Battery, Card, CheckItem, GearButton, IconButton, Light, MemoryBar, Pill, ProgressBar, Switch,
                       Tooltip, UnitSwitch, disc, round_rect)
 
 CONFIG = os.path.expanduser("~/.hobo_gui.json")
@@ -259,8 +259,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("1020x740")
-        self.minsize(1000, 640)
+        self.geometry("1100x740")
+        self.minsize(1060, 640)
         self.q = queue.Queue()
         self.busy = False
         self.cfg = self._load_cfg()
@@ -275,6 +275,8 @@ class App(tk.Tk):
         self.logger_info = None
         self.readout = None       # data read from a logger (or opened from a file): {"ro", "mem", "saved"}
         self.launch_open = False
+        self.steps = {"readout": False, "save": False, "launch": False}   # checklist progress for the connected logger
+        self.steps_serial = None
         self.launch_name = tk.StringVar()
         self.launch_interval = tk.StringVar()
         self.launch_hint = tk.StringVar()
@@ -341,6 +343,8 @@ class App(tk.Tk):
         self.battery.draw()
         for c in self._cards:
             c.restyle()
+        for item, name in self._steps_ui.values():
+            item.draw()
         self.status_pill.draw()
         self.progress.draw()
         self.memory_bar.draw()
@@ -496,8 +500,18 @@ class App(tk.Tk):
         self.status_pill = Pill(head)
         self.status_pill.pack(side="right")
         self.lbl(lb, fg="key", size=12, textvariable=self.sub).pack(anchor="w", pady=(0, 10))
-        grid = self.surface(tk.Frame(lb, background=theme.color("card_bg")))
-        grid.pack(fill="x")
+        middle = self.surface(tk.Frame(lb, background=theme.color("card_bg")))
+        middle.pack(fill="x")
+        grid = self.surface(tk.Frame(middle, background=theme.color("card_bg")))
+        grid.pack(side="left", anchor="n")
+        live_block = self.surface(tk.Frame(middle, background=theme.color("card_bg")))
+        live_block.pack(side="right", anchor="n", padx=(28, 0))
+        self.lbl(live_block, fg="temp", size=34, bold=True, textvariable=self.live_temp, width=8, anchor="e").pack(
+            anchor="e")
+        self.lbl(live_block, fg="rh", size=20, bold=True, textvariable=self.live_rh, width=10, anchor="e").pack(
+            anchor="e", pady=(2, 0))
+        self.lbl(live_block, fg="key", size=11, textvariable=self.live_next, width=20, anchor="e").pack(
+            anchor="e", pady=(6, 0))
         keys = ("Interval", "Started", "Running for", "Samples", "Memory", "Battery")
         for idx, key in enumerate(keys):
             col, r = idx // 3, idx % 3
@@ -525,15 +539,9 @@ class App(tk.Tk):
         self.launch_panel = self.surface(tk.Frame(lb, background=theme.color("card_bg")))   # shown by "3  Launch…"
         self._build_launch_panel(self.launch_panel)
 
-        live = self.card(cards)
-        live.pack(side="left", fill="both", padx=(12, 0))
-        self.lbl(live.body, fg="key", size=10, bold=True, text="NOW").pack(anchor="w")
-        self.lbl(live.body, fg="temp", size=34, bold=True, textvariable=self.live_temp, width=8, anchor="w").pack(
-            anchor="w", pady=(6, 0))
-        self.lbl(live.body, fg="rh", size=20, bold=True, textvariable=self.live_rh, width=10, anchor="w").pack(
-            anchor="w", pady=(2, 0))
-        self.lbl(live.body, fg="key", size=11, textvariable=self.live_next, width=20, anchor="w").pack(anchor="w", pady=(6, 0))
-
+        check = self.card(cards)
+        check.pack(side="left", fill="both", padx=(12, 0))
+        self._build_checklist(check.body)
 
         # ---- toolbar ----
         row = self.surface(tk.Frame(content, background=theme.color("window_bg")), "window_bg")
@@ -612,6 +620,7 @@ class App(tk.Tk):
         self.btn_launch.set_primary(connected and not logging and has_data and not unsaved)
         if (not connected or logging) and self.launch_open:
             self.hide_launch()
+        self._sync_checklist()
 
     def set_busy(self, busy, text=None):
         self.busy = busy
@@ -728,6 +737,7 @@ class App(tk.Tk):
             self.logger_info = None
             for v in self.info.values():
                 v.set("—")
+            self._reset_steps()
             self._sync_buttons()
 
     def _poll(self):
@@ -815,6 +825,8 @@ class App(tk.Tk):
         self.run_bg(work, quiet=auto)
 
     def _show_info(self, d):
+        if self.steps_serial and self.steps_serial != d["serial"]:
+            self._reset_steps()
         self.set_link("ok")
         self.logger_info = d
         self.info["Status"].set("Logging" if d["logging"] else "Stopped / idle")
@@ -844,6 +856,68 @@ class App(tk.Tk):
     INTERVALS = [("1 second", 1), ("5 seconds", 5), ("10 seconds", 10), ("30 seconds", 30), ("1 minute", 60),
                  ("5 minutes", 300), ("10 minutes", 600), ("15 minutes", 900), ("30 minutes", 1800),
                  ("1 hour", 3600), ("2 hours", 7200), ("6 hours", 21600), ("12 hours", 43200)]
+
+    # ---- checklist (right-hand card) ----
+    STEPS = (("readout", "Readout device", "Stop the logger, load its data"),
+             ("save", "Save readout", "Save the data as a CSV"),
+             ("launch", "Launch", "Set options, then restart"))
+
+    def _build_checklist(self, body):
+        self.lbl(body, fg="key", size=10, bold=True, text="CHECKLIST").pack(anchor="w")
+        # the steps and the "connect a logger" hint share one fixed-size area, so the card never changes size
+        self.check_holder = self.surface(tk.Frame(body, background=theme.color("card_bg")))
+        self.check_holder.pack(anchor="w", fill="x")
+        self.check_rows = self.surface(tk.Frame(self.check_holder, background=theme.color("card_bg")))
+        self._steps_ui = {}
+        for number, (key, title, desc) in enumerate(self.STEPS, start=1):
+            row = self.surface(tk.Frame(self.check_rows, background=theme.color("card_bg")))
+            row.pack(fill="x", pady=(10, 0))
+            item = CheckItem(row, number)
+            item.pack(side="left", anchor="n")
+            text = self.surface(tk.Frame(row, background=theme.color("card_bg")))
+            text.pack(side="left", padx=(10, 0))
+            name = self.lbl(text, size=13, bold=True, text=title, width=18, anchor="w")
+            name.pack(anchor="w")
+            self.lbl(text, fg="key", size=11, text=desc, width=26, anchor="w").pack(anchor="w")
+            self._steps_ui[key] = (item, name)
+        self.check_rows.pack(fill="x")
+        self.update_idletasks()
+        self.check_holder.config(width=self.check_rows.winfo_reqwidth(), height=self.check_rows.winfo_reqheight())
+        self.check_holder.pack_propagate(False)
+        self.check_hint = self.lbl(self.check_holder, fg="key", size=12, text="Connect a logger to start.", anchor="w")
+        self.check_rows.pack_forget()
+        self.check_hint.pack(anchor="nw", pady=(12, 0))
+
+    def _set_fg(self, widget, key):
+        """Change a themed label's colour and remember it, so a light/dark switch keeps it."""
+        for i, (w, cfg) in enumerate(self._themed):
+            if w is widget:
+                cfg["foreground"] = key
+        widget.config(foreground=theme.color(key))
+
+    def _reset_steps(self):
+        self.steps = {"readout": False, "save": False, "launch": False}
+        self.steps_serial = None
+        self._sync_checklist()
+
+    def _sync_checklist(self):
+        connected = self.link == "ok" and bool(self.logger_info)
+        if not connected:
+            self.check_rows.pack_forget()
+            self.check_hint.pack(anchor="nw", pady=(12, 0))
+            for item, name in self._steps_ui.values():
+                item.set_state("blocked", animate=False)
+            return
+        self.check_hint.pack_forget()
+        self.check_rows.pack(fill="x")
+        rd, sv, ln = self.steps["readout"], self.steps["save"], self.steps["launch"]
+        states = {"readout": "done" if rd else "pending",
+                  "save": "done" if sv else ("pending" if rd else "blocked"),
+                  "launch": "done" if ln else ("pending" if sv else "blocked")}
+        for key, state in states.items():
+            item, name = self._steps_ui[key]
+            item.set_state(state)
+            self._set_fg(name, "ink" if state == "pending" else "key")      # finished steps grey out
 
     # ---- launch panel (drops down inside the logger card) ----
     def _build_launch_panel(self, panel):
@@ -933,6 +1007,11 @@ class App(tk.Tk):
         self.hide_launch()
         self._do_launch(nm, seconds)
 
+    def _launched(self):
+        self.steps["launch"] = True
+        self.steps_serial = (self.logger_info or {}).get("serial", self.steps_serial)
+        self._sync_checklist()
+
     @staticmethod
     def _capacity_samples():
         return (0x10000 - 0x190) // 3        # about 21,700 samples (64 KB, 3 bytes each)
@@ -943,7 +1022,7 @@ class App(tk.Tk):
         def work():
             with Logger() as lg:
                 after = launch_logger(lg, seconds, name, progress=lambda t: self.q.put(("status", t)))
-            return lambda: (self._show_info(after), self.msg.set(""),
+            return lambda: (self._show_info(after), self.msg.set(""), self._launched(),
                             self.notify("action", "ok", f"Launched. Logging every {self._fmt_interval(seconds)}; "
                                         f"memory lasts about {self._fmt_span(self._capacity_samples() * seconds)}.",
                                         timeout=30000))
@@ -1034,6 +1113,8 @@ class App(tk.Tk):
 
     def _read_out(self, ro, mem, after):
         self.readout = {"ro": ro, "mem": mem, "saved": False, "from_logger": True, "logger_samples": after["samples"]}
+        self.steps = {"readout": True, "save": False, "launch": False}      # a new readout starts the checklist over
+        self.steps_serial = ro.serial
         self.progress["value"] = 100
         self._show_info(after)
         self.show(ro)
@@ -1046,11 +1127,12 @@ class App(tk.Tk):
         if not self.readout:
             return
         ro, mem = self.readout["ro"], self.readout["mem"]
-        default = f"{ro.name}_{ro.serial}_{datetime.now():%Y%m%d-%H%M}".replace(" ", "_")
+        default = f"{ro.name}_{datetime.now():%Y%m%d-%H%M}".replace(" ", "_")
         if self.ask_each_time.get() or not os.path.isdir(self.last_dir):
+            # No filetypes list: it adds a "Format" popup that the compact macOS save panel clips off its edge.
             path = filedialog.asksaveasfilename(
                 title="Save readout as", initialdir=self.last_dir, initialfile=default + ".csv",
-                defaultextension=".csv", filetypes=[("CSV file", "*.csv")])
+                defaultextension=".csv")
             if not path:
                 return  # cancelled
         else:
@@ -1063,6 +1145,8 @@ class App(tk.Tk):
             self.notify("error", "err", f"Could not save: {e}")
             return
         self.readout["saved"] = True
+        if self.readout.get("from_logger") and self.steps["readout"]:
+            self.steps["save"] = True
         self.dismiss("readout")
         self.notify("download", "ok", f"Saved {len(ro.samples):,} samples to {os.path.basename(csv_path)}. "
                     "Step 3: launch the logger when you are ready.",
@@ -1071,7 +1155,7 @@ class App(tk.Tk):
         self._sync_buttons()
 
     def open_file(self):
-        path = filedialog.askopenfilename(title="Open a .hobo file", filetypes=[("HOBO files", "*.hobo"), ("All", "*.*")])
+        path = filedialog.askopenfilename(title="Open a .hobo file", filetypes=[("HOBO files", "*.hobo")])
         if not path:
             return
         try:
