@@ -1,0 +1,3 @@
+-r requirements.txt
+pillow>=10      # only to regenerate icons (scripts/make_icons.py)
+pyinstaller>=6   # only to build the Mac app (scripts/build_app.sh)

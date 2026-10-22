@@ -464,6 +464,61 @@ class LaunchStep(GuiCase):
         self.assertFalse(self.app.busy)
 
 
+class StopButton(GuiCase):
+    """Stop the logger on its own, without reading it out (e.g. a logger that will sit on a desk)."""
+
+    def test_only_enabled_while_logging(self):
+        self.assertEqual(self.app.btn_stop.state, "normal")
+        self.device.logging = False
+        self.click(self.app.btn_connect)
+        self.wait(lambda: self.app.status_pill.text == "Stopped")
+        self.assertEqual(self.app.btn_stop.state, "disabled")
+
+    def test_disabled_without_a_logger(self):
+        self.device.present = False
+        self.wait(lambda: self.app.link == "none")
+        self.assertEqual(self.app.btn_stop.state, "disabled")
+
+    def test_stops_the_logger_and_keeps_its_data(self):
+        pointer = self.device.pointer
+        self.click(self.app.btn_stop)
+        self.wait(lambda: not self.device.logging and not self.app.busy)
+        self.spin(0.3)
+        self.assertEqual(len(self.asked), 1)
+        self.assertEqual(self.device.pointer, pointer)                      # nothing was erased
+        a = self.app
+        self.assertEqual(a.status_pill.text, "Stopped")
+        self.assertEqual(a.btn_stop.state, "disabled")
+        self.assertEqual(a.btn_launch.state, "normal")                      # it can be launched again now
+        self.assertIn("action", a._notices)
+        self.assertIsNone(a.readout)                                        # and no readout was taken
+        self.assertEqual(a.steps, {"readout": False, "save": False, "launch": False})
+
+    def test_cancelling_the_confirmation_keeps_it_running(self):
+        self.answers["yesno"] = False
+        self.click(self.app.btn_stop)
+        self.spin(0.5)
+        self.assertTrue(self.device.logging)
+        self.assertEqual(self.app.btn_stop.state, "normal")
+
+    def test_failure_shows_an_error_and_the_button_recovers(self):
+        self.device.fail_open = True
+        self.click(self.app.btn_stop)
+        self.wait(lambda: "error" in self.app._notices)
+        self.assertFalse(self.app.busy)
+        self.device.fail_open = False
+        self.wait(lambda: self.app.btn_stop.state == "normal")
+
+    def test_not_available_from_the_menu_when_stopped(self):
+        self.device.logging = False
+        self.click(self.app.btn_connect)
+        self.wait(lambda: self.app.status_pill.text == "Stopped")
+        self.spin(0.5)
+        menu = self.app.nametowidget(self.app.cget("menu"))
+        file_menu = self.app.nametowidget(menu.entrycget(2, "menu"))
+        self.assertEqual(file_menu.entrycget(file_menu.index("end"), "state"), "disabled")
+
+
 class Controls(GuiCase):
     def test_unit_rocker(self):
         a = self.app
@@ -536,15 +591,15 @@ class Controls(GuiCase):
         file_menu = self.app.nametowidget(menu.entrycget(2, "menu")) if menu.type(2) == "cascade" else None
         entries = [(file_menu.entrycget(i, "label"), file_menu.entrycget(i, "state")) for i in range(file_menu.index("end") + 1)]
         self.assertEqual([e[0] for e in entries], ["Open .hobo File…", "Refresh Logger", "Readout Device…", "Save Readout…",
-                                                   "Launch Logger…"])
-        self.assertEqual([e[1] for e in entries], ["normal", "normal", "normal", "disabled", "disabled"])
+                                                   "Launch Logger…", "Stop Logging…"])
+        self.assertEqual([e[1] for e in entries], ["normal", "normal", "normal", "disabled", "disabled", "normal"])
         file_menu.invoke(0)                                                 # Open .hobo File…
         self.assertIn("open", self.dialog_calls)
         file_menu.invoke(2)                                                 # Readout Device…
         self.wait(lambda: self.app.readout is not None and not self.app.busy)
         self.spin(0.5)
         entries = [file_menu.entrycget(i, "state") for i in range(file_menu.index("end") + 1)]
-        self.assertEqual(entries, ["normal"] * 5)
+        self.assertEqual(entries, ["normal"] * 5 + ["disabled"])          # stopped now, so Stop is off
 
 
 class PlotBehaviour(GuiCase):

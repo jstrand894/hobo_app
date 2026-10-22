@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 import time as _time
 from tkinter import filedialog, messagebox, ttk
 
-from .actions import describe, launch_logger, live, read_until_end, write_files
+from .actions import describe, launch_logger, live, read_until_end, stop_logging, write_files
 from .decode import Readout
 from .device import Logger, logger_present
 from . import autostart, theme
@@ -354,7 +354,7 @@ class App(tk.Tk):
         self.plot.redraw()
         for key, (row, kind, text, actions, dismissible) in dict(self._notices).items():
             self.notify(key, kind, text, actions, dismissible)
-        for w in (self.btn_connect, self.btn_readout, self.btn_save, self.btn_launch, self.btn_open,
+        for w in (self.btn_connect, self.btn_readout, self.btn_save, self.btn_launch, self.btn_stop, self.btn_open,
                   self.unit_switch):
             w.draw()
 
@@ -435,7 +435,8 @@ class App(tk.Tk):
                    ("Refresh Logger", "r", self.btn_connect, self.connect),
                    ("Readout Device…", "d", self.btn_readout, self.readout_device),
                    ("Save Readout…", "s", self.btn_save, self.save_readout),
-                   ("Launch Logger…", "l", self.btn_launch, self.toggle_launch))
+                   ("Launch Logger…", "l", self.btn_launch, self.toggle_launch),
+                   ("Stop Logging…", ".", self.btn_stop, self.stop_logger))
         self._menu_entries = []
         for i, (label, key, btn, cmd) in enumerate(entries):
             filem.add_command(label=label, accelerator=f"Cmd+{key.upper() if key != '.' else '.'}", command=cmd)
@@ -556,8 +557,10 @@ class App(tk.Tk):
         self.btn_save.pack(side="left", padx=8)
         self.btn_launch = button("3  Launch…", "launch", self.toggle_launch, state="disabled")
         self.btn_launch.pack(side="left")
+        self.btn_stop = button("Stop logging", "stop", self.stop_logger, state="disabled")
+        self.btn_stop.pack(side="left", padx=(24, 0))
         self.btn_connect = button("Refresh", "refresh", self.connect)
-        self.btn_connect.pack(side="left", padx=(28, 8))
+        self.btn_connect.pack(side="left", padx=(24, 8))
         self.btn_open = button("Open file…", "open", self.open_file)
         self.btn_open.pack(side="left")
 
@@ -580,6 +583,9 @@ class App(tk.Tk):
                 if self.btn_launch.state == "normal" else (
                     "Read out the device first. That stops the logger so it can be launched."
                     if self.link == "ok" else off_connect()))
+        Tooltip(self.btn_stop, lambda: "Stop the logger without reading it out. The recorded data stays on it."
+                if self.btn_stop.state == "normal" else (
+                    "The logger is not logging." if self.link == "ok" else off_connect()))
         Tooltip(self.btn_open, "Open a saved .hobo file and plot it. No logger needed.")
         Tooltip(self.gear, "Settings and About")
         Tooltip(self.unit_switch, "Show temperature in °F or °C in the app. Saved CSV files are always in °C.")
@@ -615,6 +621,7 @@ class App(tk.Tk):
         self.btn_readout.config(state="normal" if connected else "disabled")
         self.btn_save.config(state="normal" if has_data else "disabled")
         self.btn_launch.config(state="normal" if connected and not logging else "disabled")
+        self.btn_stop.config(state="normal" if logging else "disabled")
         self.btn_readout.set_primary(connected and not has_data)
         self.btn_save.set_primary(unsaved)
         self.btn_launch.set_primary(connected and not logging and has_data and not unsaved)
@@ -628,7 +635,7 @@ class App(tk.Tk):
         self.btn_connect.config(state=state)
         self.btn_open.config(state=state)
         if busy:
-            for b in (self.btn_readout, self.btn_save, self.btn_launch):
+            for b in (self.btn_readout, self.btn_save, self.btn_launch, self.btn_stop):
                 b.config(state="disabled")
             self.progress.config(mode="indeterminate", value=0)
             self.progress.start(12)
@@ -1109,6 +1116,27 @@ class App(tk.Tk):
                 after = describe(lg)
             ro = Readout(mem)
             return lambda: self._read_out(ro, mem, after)
+        self.run_bg(work)
+
+    def stop_logger(self):
+        """Stop the logger without reading it out (the recorded data stays on it)."""
+        d = self.logger_info or {}
+        if not d.get("logging"):
+            return
+        if not messagebox.askyesno(
+                "Stop logging?",
+                f"Stop logging on {d.get('name', 'this logger')} (serial {d.get('serial', '?')})?\n\n"
+                "The data already recorded stays on the logger. Use Readout device to load and save it.",
+                icon="warning", default="no"):
+            return
+        self.set_busy(True, "Stopping the logger…")
+
+        def work():
+            with Logger() as lg:
+                after = stop_logging(lg)
+            return lambda: (self._show_info(after), self.msg.set(""),
+                            self.notify("action", "info", "Logging stopped. The data is still on the logger.",
+                                        timeout=20000))
         self.run_bg(work)
 
     def _read_out(self, ro, mem, after):
