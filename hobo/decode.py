@@ -9,8 +9,6 @@ import csv
 import sys
 from datetime import datetime, timedelta
 
-DATA_START = 0x190
-
 # Event type nibble -> (length in nibbles, name). Only types seen so far are listed.
 EVENTS = {0x0: (6, "coupler detached"), 0x4: (5, "bad battery"), 0x5: (5, "good battery")}
 # Events that mark the end of recorded samples: 1 coupler attached, 3 host connected, 6 stopped,
@@ -18,9 +16,14 @@ EVENTS = {0x0: (6, "coupler detached"), 0x4: (5, "bad battery"), 0x5: (5, "good 
 TERMINAL = {0x1, 0x3, 0x6, 0xF}
 
 
-def _find(mem: bytes, tag: int, n: int):
-    i = mem.find(bytes([0x88, tag, n]), 4, DATA_START)
-    return None if i < 0 else mem[i + 3:i + 3 + n]
+def parse_records(mem: bytes):
+    """Flat list of [tag, value] for the 0x88-delimited header records, and the offset where they end."""
+    i, out = 4, []
+    while i + 2 < len(mem) and mem[i] == 0x88:
+        tag, n = mem[i + 1], mem[i + 2]
+        out.append([tag, bytes(mem[i + 3:i + 3 + n])])
+        i += 3 + n
+    return out, i
 
 
 def temp_c(raw: int) -> float:
@@ -32,23 +35,31 @@ def rh_pct(raw: int) -> float:
 
 
 class Readout:
-    def __init__(self, mem: bytes):
+    def __init__(self, mem: bytes, end: int = None):
+        """mem: memory image. end: byte address where recorded data ends (the logger's write pointer);
+        needed for a logger that is still logging, whose memory beyond that point is stale."""
         self.mem = mem
-        start = _find(mem, 0x07, 8)
+        self.end = end
+        rec = {t: v for t, v in parse_records(mem)[0]}
+        for needed in (0x06, 0x07, 0x08, 0x0A, 0x0D):
+            if needed not in rec:
+                raise ValueError(f"not a HOBO U23 readout: header record 0x{needed:02x} is missing")
+        start = rec[0x07]
         # bytes: century(0x14=20), yy, month, day, hour, minute, second
         self.start = datetime(start[0] * 100 + start[1], start[2], start[3], start[4], start[5], start[6])
-        self.interval_s = int.from_bytes(_find(mem, 0x08, 4), "big")
-        self.serial = _find(mem, 0x06, 8).decode("ascii")
-        self.name = _find(mem, 0x0A, mem[mem.find(bytes([0x88, 0x0A]), 4) + 2]).decode("ascii", "replace")
+        self.interval_s = int.from_bytes(rec[0x08], "big")
+        self.serial = rec[0x06].decode("ascii")
+        self.name = rec[0x0A].decode("ascii", "replace")
+        self.data_start = int.from_bytes(rec[0x0D], "big")
         self.ended = False   # True once a terminating event (stopped, coupler attached, ...) was seen
         self.end_byte = len(mem)
         self.samples, self.events = self._decode()
 
     def _decode(self):
         nib = []
-        for b in self.mem:
+        for b in (self.mem if self.end is None else self.mem[:self.end]):
             nib += [b >> 4, b & 15]
-        pos, samples, events = DATA_START * 2, [], []
+        pos, samples, events = self.data_start * 2, [], []
         while pos + 5 < len(nib):
             t = nib[pos] << 8 | nib[pos + 1] << 4 | nib[pos + 2]
             if t == 0xFFF:
@@ -56,7 +67,8 @@ class Readout:
                 if typ in TERMINAL:
                     self.ended = True
                     self.end_byte = pos // 2
-                    break
+                    self.end_nibble = pos
+                    return samples, events
                 if typ not in EVENTS:
                     raise ValueError(f"unknown event type 0x{typ:x} at byte 0x{pos // 2:x}; "
                                      "refusing to guess so data is not silently truncated")
@@ -67,6 +79,7 @@ class Readout:
             h = nib[pos + 3] << 8 | nib[pos + 4] << 4 | nib[pos + 5]
             samples.append((t, h))
             pos += 6
+        self.end_nibble = pos   # where the next unread item would start
         return samples, events
 
     def rows(self, utc_offset_h=-5):
@@ -74,7 +87,7 @@ class Readout:
             when = self.start + timedelta(seconds=self.interval_s * k)
             yield when, temp_c(t), rh_pct(h)
 
-    def write_csv(self, path, fahrenheit=True, utc_offset_h=-5):
+    def write_csv(self, path, fahrenheit=False, utc_offset_h=-5):
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["#", f"time GMT{utc_offset_h:+d}:00", "Temp F" if fahrenheit else "Temp C", "RH %"])

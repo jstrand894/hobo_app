@@ -1,4 +1,6 @@
-"""Generate button icons (hobo/assets/*.png) and the app icon (assets/app.icns).
+"""Generate the glow images for the connection light (hobo/assets/halo_*.png) and the app icon.
+
+Button icons and the lamp itself are vector drawings in hobo/widgets.py, so they stay sharp on Retina.
 
 Dev-time only; needs Pillow. The generated files are committed, so users don't need to run this.
 Run from the project folder:  .venv/bin/python scripts/make_icons.py
@@ -9,7 +11,7 @@ import shutil
 import subprocess
 import tempfile
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS = os.path.join(ROOT, "hobo", "assets")
@@ -17,73 +19,19 @@ BLUE, RED, GREEN, GRAY = "#2e86ab", "#d1495b", "#3a9d5d", "#555555"
 S = 8  # supersampling factor for smooth edges
 
 
-def canvas(size=20):
-    n = size * S
-    img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
-    return img, ImageDraw.Draw(img), n
-
-
-def finish(img, size=20):
+def halo(rgb, strength, size=44):
+    """Soft coloured glow with a transparent background (blurred, so low resolution is invisible)."""
+    n = size * 2
+    img = Image.new("RGBA", (n, n), rgb + (0,))
+    d = ImageDraw.Draw(img)
+    r = n * 0.20
+    c = n / 2
+    d.ellipse([c - r, c - r, c + r, c + r], fill=rgb + (int(255 * strength),))
+    img = img.filter(ImageFilter.GaussianBlur(n * 0.06))
+    core = Image.new("RGBA", (n, n), rgb + (0,))
+    ImageDraw.Draw(core).ellipse([c - r * .75, c - r * .75, c + r * .75, c + r * .75], fill=rgb + (int(150 * strength),))
+    img = Image.alpha_composite(img, core.filter(ImageFilter.GaussianBlur(n * 0.04)))
     return img.resize((size, size), Image.LANCZOS)
-
-
-def p(n, x, y):  # unit coords (0-1) -> pixels
-    return x * n, y * n
-
-
-def icon_connect():
-    img, d, n = canvas()
-    w = int(n * 0.085)
-    # plug body, two prongs, cord
-    d.rounded_rectangle([n * .26, n * .30, n * .74, n * .62], radius=n * .06, fill=BLUE)
-    d.rectangle([n * .36, n * .12, n * .43, n * .32], fill=BLUE)
-    d.rectangle([n * .57, n * .12, n * .64, n * .32], fill=BLUE)
-    d.rectangle([n * .46, n * .60, n * .54, n * .90], fill=BLUE)
-    return finish(img)
-
-
-def icon_download():
-    img, d, n = canvas()
-    w = int(n * 0.10)
-    d.line([p(n, .5, .10), p(n, .5, .62)], fill=BLUE, width=w)
-    d.polygon([p(n, .26, .46), p(n, .74, .46), p(n, .5, .74)], fill=BLUE)
-    d.line([p(n, .18, .70), p(n, .18, .88), p(n, .82, .88), p(n, .82, .70)], fill=BLUE, width=w, joint="curve")
-    return finish(img)
-
-
-def icon_stop():
-    img, d, n = canvas()
-    d.rounded_rectangle([n * .20, n * .20, n * .80, n * .80], radius=n * .10, fill=RED)
-    return finish(img)
-
-
-def icon_launch():
-    img, d, n = canvas()
-    d.polygon([p(n, .26, .16), p(n, .26, .84), p(n, .82, .50)], fill=GREEN)
-    return finish(img)
-
-
-def icon_open():
-    img, d, n = canvas()
-    w = int(n * 0.08)
-    d.line([p(n, .12, .78), p(n, .12, .22), p(n, .40, .22), p(n, .48, .32), p(n, .84, .32), p(n, .84, .78), p(n, .12, .78)],
-           fill=GRAY, width=w, joint="curve")
-    d.polygon([p(n, .12, .78), p(n, .24, .46), p(n, .94, .46), p(n, .84, .78)], fill=BLUE)
-    return finish(img)
-
-
-def icon_refresh():
-    img, d, n = canvas()
-    w = int(n * 0.10)
-    box = [n * .18, n * .18, n * .82, n * .82]
-    d.arc(box, start=40, end=330, fill=BLUE, width=w)
-    a = math.radians(40)
-    cx = cy = n * .5
-    r = n * .32
-    tip = (cx + r * math.cos(a), cy - r * math.sin(a))
-    d.polygon([(tip[0] + n * .20, tip[1] - n * .02), (tip[0] - n * .02, tip[1] - n * .16), (tip[0] - n * .06, tip[1] + n * .13)],
-              fill=BLUE)
-    return finish(img)
 
 
 def app_icon(size=1024):
@@ -122,9 +70,12 @@ def app_icon(size=1024):
 
 def main():
     os.makedirs(ASSETS, exist_ok=True)
-    for name, fn in (("connect", icon_connect), ("download", icon_download), ("stop", icon_stop),
-                     ("launch", icon_launch), ("open", icon_open), ("refresh", icon_refresh)):
-        fn().save(os.path.join(ASSETS, name + ".png"))
+    green, amber = (40, 215, 80), (255, 159, 10)
+    frames = 20                                              # frames for a smooth, gentle pulse
+    for i in range(frames):
+        st = 0.62 + 0.14 * math.sin(2 * math.pi * i / frames)   # 0.48 .. 0.76: a slow, subtle swell
+        halo(green, st).save(os.path.join(ASSETS, f"halo_ok_{i:02d}.png"))
+    halo(amber, 0.5).save(os.path.join(ASSETS, "halo_detected.png"))
     big = app_icon(1024)
     big.resize((256, 256), Image.LANCZOS).save(os.path.join(ASSETS, "app.png"))
     tmp = tempfile.mkdtemp(suffix=".iconset")

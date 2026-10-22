@@ -6,6 +6,7 @@ GET_DESCRIPTOR(string, index 10, langid 0x0904).
 """
 import os
 import sys
+import time
 
 os.environ.setdefault("DYLD_FALLBACK_LIBRARY_PATH", "/opt/homebrew/lib")
 
@@ -37,8 +38,15 @@ class Logger:
         self.dev = usb.core.find(idVendor=VID, idProduct=PID, backend=_backend())
         if self.dev is None:
             raise RuntimeError("No HOBO logger found. Is the adapter plugged in and HOBOware closed?")
-        self.dev.set_configuration()
-        usb.util.claim_interface(self.dev, 0)
+        for attempt in range(5):   # another window or poll may hold the interface for a moment
+            try:
+                self.dev.set_configuration()
+                usb.util.claim_interface(self.dev, 0)
+                break
+            except usb.core.USBError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.4)
 
     def close(self):
         usb.util.release_interface(self.dev, 0)
@@ -56,11 +64,31 @@ class Logger:
         self.dev.ctrl_transfer(0x21, 0x09, 0x0003, 0, data, timeout=2000)
         return bytes(self.dev.read(0x81, 8, timeout=2000))
 
+    LOGGING_BIT = 0x02   # state byte: 0x12 / 0x92 = logging, 0x00 / 0x10 / 0x80 / 0x90 = stopped
+
     def status(self) -> dict:
+        """Decode the reply to `02 02` (layout inferred from captures, checked against launch settings)."""
         s = self.command(bytes([0x02, 0x02]))
-        return {"raw": s.hex(" "), "state": s[0], "interval_s": s[4] if s[0] == 0x12 else None,
-                "next_sample_in_s": s[7] if s[0] == 0x12 else None,
-                "pointer": s[1] << 8 | s[2]}  # end of recorded data in memory (validated on a stopped logger)
+        logging = bool(s[0] & self.LOGGING_BIT)
+        return {"raw": s.hex(" "), "state": s[0], "logging": logging,
+                "pointer": s[1] << 8 | s[2],            # end of recorded data in memory
+                "interval_s": s[3] << 8 | s[4],          # logging interval, seconds
+                "next_sample_in_s": int.from_bytes(s[5:8], "big") if logging else None}
+
+    def stop(self, timeout_s=3.0) -> dict:
+        """Stop logging (`01 00`, as HOBOware sends it) and confirm the state changed. Data is kept."""
+        if not self.status()["logging"]:
+            return self.status()
+        self.command(bytes([0x01, 0x00]))   # HOBOware sends this twice back to back; a single one is ignored
+        self.command(bytes([0x01, 0x00]))
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            st = self.status()
+            if not st["logging"]:
+                self.command(bytes([0x01, 0x01]))  # end of session, as HOBOware does after a readout
+                return self.status()
+            time.sleep(0.2)
+        raise RuntimeError("The logger did not stop. Check the connection and try again.")
 
     def read_block(self, addr: int) -> bytes:
         self.command(bytes([0x03, (addr >> 16) & 0xFF, (addr >> 8) & 0xFF, addr & 0xFF]))

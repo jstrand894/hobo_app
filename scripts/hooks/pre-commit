@@ -1,0 +1,19 @@
+#!/bin/bash
+# Bump the patch version in hobo/version.py on every commit (1.0.0 -> 1.0.1 -> 1.0.2 ...).
+# Skipped if you already staged a different version yourself (e.g. a manual 1.1.0), or HOBO_NO_BUMP=1.
+set -e
+FILE="hobo/version.py"
+[ -n "$HOBO_NO_BUMP" ] && exit 0
+[ -f "$FILE" ] || exit 0
+current=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$FILE")
+committed=$(git show "HEAD:$FILE" 2>/dev/null | sed -n 's/^__version__ = "\(.*\)"$/\1/p')
+# you changed the version by hand relative to the last commit: respect it
+if [ -n "$committed" ] && [ "$current" != "$committed" ]; then
+    git add "$FILE"
+    exit 0
+fi
+IFS=. read -r major minor patch <<< "$current"
+new="$major.$minor.$((patch + 1))"
+sed -i '' "s/^__version__ = \".*\"$/__version__ = \"$new\"/" "$FILE"
+git add "$FILE"
+echo "version bumped: $current -> $new"
