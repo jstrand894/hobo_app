@@ -13,6 +13,9 @@ DATA_START = 0x190
 
 # Event type nibble -> (length in nibbles, name). Only types seen so far are listed.
 EVENTS = {0x0: (6, "coupler detached"), 0x4: (5, "bad battery"), 0x5: (5, "good battery")}
+# Events that mark the end of recorded samples: 1 coupler attached, 3 host connected, 6 stopped,
+# 0xF unwritten memory.
+TERMINAL = {0x1, 0x3, 0x6, 0xF}
 
 
 def _find(mem: bytes, tag: int, n: int):
@@ -37,6 +40,8 @@ class Readout:
         self.interval_s = int.from_bytes(_find(mem, 0x08, 4), "big")
         self.serial = _find(mem, 0x06, 8).decode("ascii")
         self.name = _find(mem, 0x0A, mem[mem.find(bytes([0x88, 0x0A]), 4) + 2]).decode("ascii", "replace")
+        self.ended = False   # True once a terminating event (stopped, coupler attached, ...) was seen
+        self.end_byte = len(mem)
         self.samples, self.events = self._decode()
 
     def _decode(self):
@@ -48,8 +53,13 @@ class Readout:
             t = nib[pos] << 8 | nib[pos + 1] << 4 | nib[pos + 2]
             if t == 0xFFF:
                 typ = nib[pos + 3]
+                if typ in TERMINAL:
+                    self.ended = True
+                    self.end_byte = pos // 2
+                    break
                 if typ not in EVENTS:
-                    break  # end of recorded data / unknown event
+                    raise ValueError(f"unknown event type 0x{typ:x} at byte 0x{pos // 2:x}; "
+                                     "refusing to guess so data is not silently truncated")
                 n, name = EVENTS[typ]
                 events.append((len(samples), name))
                 pos += n

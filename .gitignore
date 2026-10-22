@@ -3,3 +3,7 @@ __pycache__/
 hook/*.dylib
 captures/
 .DS_Store
+downloads/
+build/
+dist/
+*.spec

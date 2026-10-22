@@ -5,9 +5,11 @@ interrupt IN endpoint. Memory reads (opcode 0x03) additionally return 64 bytes t
 GET_DESCRIPTOR(string, index 10, langid 0x0904).
 """
 import os
+import sys
 
 os.environ.setdefault("DYLD_FALLBACK_LIBRARY_PATH", "/opt/homebrew/lib")
 
+import usb.backend.libusb1  # noqa: E402
 import usb.core  # noqa: E402
 import usb.util  # noqa: E402
 
@@ -15,9 +17,24 @@ VID, PID = 0x0F1B, 0x0160
 BLOCK = 0x40
 
 
+def _backend():
+    """In the bundled app, use the libusb shipped inside it; otherwise let pyusb find it."""
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        lib = os.path.join(base, "libusb-1.0.0.dylib")
+        if os.path.exists(lib):
+            return usb.backend.libusb1.get_backend(find_library=lambda _: lib)
+    return None
+
+
+def logger_present() -> bool:
+    """True if a HOBO logger is visible on USB (does not open it)."""
+    return usb.core.find(idVendor=VID, idProduct=PID, backend=_backend()) is not None
+
+
 class Logger:
     def __init__(self):
-        self.dev = usb.core.find(idVendor=VID, idProduct=PID)
+        self.dev = usb.core.find(idVendor=VID, idProduct=PID, backend=_backend())
         if self.dev is None:
             raise RuntimeError("No HOBO logger found. Is the adapter plugged in and HOBOware closed?")
         self.dev.set_configuration()
@@ -42,7 +59,8 @@ class Logger:
     def status(self) -> dict:
         s = self.command(bytes([0x02, 0x02]))
         return {"raw": s.hex(" "), "state": s[0], "interval_s": s[4] if s[0] == 0x12 else None,
-                "next_sample_in_s": s[7] if s[0] == 0x12 else None}
+                "next_sample_in_s": s[7] if s[0] == 0x12 else None,
+                "pointer": s[1] << 8 | s[2]}  # end of recorded data in memory (validated on a stopped logger)
 
     def read_block(self, addr: int) -> bytes:
         self.command(bytes([0x03, (addr >> 16) & 0xFF, (addr >> 8) & 0xFF, addr & 0xFF]))
